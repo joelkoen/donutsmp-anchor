@@ -112,6 +112,10 @@ pub fn offset(offset: ChunkOffset, packet: &mut ClientboundGamePacket) {
         ClientboundGamePacket::BlockUpdate(block) => {
             block.pos -= offset;
         }
+        ClientboundGamePacket::InitializeBorder(border) => {
+            border.new_center_x -= offset.block_x() as f64;
+            border.new_center_z -= offset.block_z() as f64;
+        }
         _ => (),
     }
 }
@@ -134,7 +138,8 @@ pub fn needs_offset(packet: &ClientboundGamePacket) -> bool {
         | ClientboundGamePacket::BlockDestruction(_)
         | ClientboundGamePacket::BlockEntityData(_)
         | ClientboundGamePacket::BlockEvent(_)
-        | ClientboundGamePacket::BlockUpdate(_) => true,
+        | ClientboundGamePacket::BlockUpdate(_)
+        | ClientboundGamePacket::InitializeBorder(_) => true,
         _ => false,
     }
 }
