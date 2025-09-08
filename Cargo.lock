@@ -1184,7 +1184,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9c272297e804878a2a4b707cfcfc6d2328b5bb936944613b4fdf2b9269afdfd"
 
 [[package]]
-name = "donutsmp-intercept"
+name = "donutsmp-anchor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
