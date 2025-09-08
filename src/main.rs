@@ -1,6 +1,3 @@
-//! A "simple" server that gets login information and proxies connections.
-//! After login all connections are encrypted and Azalea cannot read them.
-
 use std::sync::Arc;
 use std::{error::Error, io::Cursor, sync::LazyLock};
 
@@ -42,25 +39,22 @@ mod offset;
 
 use crate::offset::{clientbound, serverbound};
 
+const ACCOUNT: &str = "5649";
 const LISTEN_ADDR: &str = "127.0.0.1:25566";
 const TARGET_ADDR: &str = "donutsmp.net";
 
-const PROXY_DESC: &str = "An Azalea Minecraft Proxy";
-
-// String must be formatted like "data:image/png;base64,<data>"
+const PROXY_DESC: &str = "donutsmp-anchor";
 static PROXY_FAVICON: LazyLock<Option<String>> = LazyLock::new(|| None);
 
 static PROXY_VERSION: LazyLock<Version> = LazyLock::new(|| Version {
     name: VERSION_NAME.to_string(),
     protocol: PROTOCOL_VERSION,
 });
-
 const PROXY_PLAYERS: Players = Players {
     max: 1,
     online: 0,
     sample: Vec::new(),
 };
-
 const PROXY_SECURE_CHAT: Option<bool> = Some(false);
 
 #[tokio::main]
@@ -195,14 +189,12 @@ async fn handle_connection(stream: TcpStream) -> anyhow::Result<()> {
 async fn transfer(
     mut client_conn: Connection<ServerboundLoginPacket, ClientboundLoginPacket>,
 ) -> Result<(), Box<dyn Error>> {
-    // resolve TARGET_ADDR
     let parsed_target_addr = ServerAddress::try_from(TARGET_ADDR).unwrap();
     let resolved_target_addr = resolve_address(&parsed_target_addr).await?;
 
     let mut server_conn = Connection::new(&resolved_target_addr).await?;
 
-    let account = Account::microsoft("5649").await?;
-    // println!("got account: {:?}", account);
+    let account = Account::microsoft(ACCOUNT).await?;
 
     server_conn
         .write(ServerboundIntention {
@@ -224,8 +216,6 @@ async fn transfer(
 
     let (server_conn, login_finished) = loop {
         let packet = server_conn.read().await?;
-
-        // println!("got packet: {:?}", packet);
 
         match packet {
             ClientboundLoginPacket::Hello(p) => {
