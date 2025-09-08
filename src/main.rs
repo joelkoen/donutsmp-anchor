@@ -7,6 +7,8 @@ use std::{error::Error, io::Cursor, sync::LazyLock};
 use anyhow::Result;
 use azalea::Account;
 use azalea::auth::sessionserver::ClientSessionServerError;
+use azalea::protocol::connect::{RawReadConnection, RawWriteConnection};
+use azalea::protocol::packets::config::ClientboundConfigPacket;
 use azalea::protocol::{
     ServerAddress,
     connect::Connection,
@@ -371,83 +373,88 @@ async fn transfer(
     });
 
     let copy_remote_to_local = tokio::spawn({
-        let offset_lock = offset_lock.clone();
-        async move {
-            let mut target_raw_reader = target_raw_reader;
-            let mut listen_raw_writer = listen_raw_writer;
-
-            let mut packets_to_offset: Vec<ClientboundGamePacket> = vec![];
-
-            loop {
-                let mut packet = match target_raw_reader.read().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("Error reading packet from target: {e}");
-                        return;
-                    }
-                };
-
-                // decode as a game packet
-                let decoded_packet = azalea::protocol::read::deserialize_packet::<
-                    ClientboundGamePacket,
-                >(&mut Cursor::new(&packet));
-                if let Ok(mut decoded_packet) = decoded_packet {
-                    match &decoded_packet {
-                        ClientboundGamePacket::SetDefaultSpawnPosition(spawn) => {
-                            let x = (spawn.pos.x / 16) - 2;
-                            let z = (spawn.pos.z / 16) + 1;
-                            let offset = ChunkOffset { x, z };
-                            println!("offset found: {x} {z}");
-
-                            for mut decoded_packet in packets_to_offset {
-                                clientbound::offset(offset, &mut decoded_packet);
-                                let packet =
-                                    azalea::protocol::write::serialize_packet(&decoded_packet)
-                                        .unwrap();
-                                match listen_raw_writer.write(&packet).await {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        error!("Error writing packet to listen: {e}");
-                                        return;
-                                    }
-                                }
-                            }
-                            packets_to_offset = vec![];
-
-                            let mut w = offset_lock.write().await;
-                            *w = Some(offset)
-                        }
-                        ClientboundGamePacket::StartConfiguration(_) => {
-                            let mut w = offset_lock.write().await;
-                            *w = None;
-                        }
-                        _ => (),
-                    }
-
-                    if clientbound::needs_offset(&decoded_packet) {
-                        if let Some(offset) = *offset_lock.read().await {
-                            clientbound::offset(offset, &mut decoded_packet);
-                            packet =
-                                azalea::protocol::write::serialize_packet(&decoded_packet).unwrap();
-                        } else {
-                            packets_to_offset.push(decoded_packet);
-                            continue;
-                        }
-                    }
-                }
-
-                match listen_raw_writer.write(&packet).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("Error writing packet to listen: {e}");
-                        return;
-                    }
-                }
-            }
-        }
+        async move { remote_to_local(offset_lock.clone(), target_raw_reader, listen_raw_writer).await }
     });
 
     tokio::try_join!(copy_listen_to_target, copy_remote_to_local,)?;
 
     Ok(())
+}
+
+async fn remote_to_local(
+    offset_lock: Arc<RwLock<Option<ChunkOffset>>>,
+    target_raw_reader: RawReadConnection,
+    listen_raw_writer: RawWriteConnection,
+) -> Result<()> {
+    let mut target_raw_reader = target_raw_reader;
+    let mut listen_raw_writer = listen_raw_writer;
+
+    // changing the order of packets to wait for the offset seems to mess with donutsmp's anticheat
+    // isntead, we don't send any packets to the client until we've got the info to be able to reverse the offset
+    let mut state = State::Configuration;
+    let mut pretick_packets: Vec<Box<[u8]>> = vec![];
+
+    loop {
+        let packet = target_raw_reader.read().await?;
+        match &state {
+            State::Configuration => {
+                let decoded_packet = azalea::protocol::read::deserialize_packet::<
+                    ClientboundConfigPacket,
+                >(&mut Cursor::new(&packet))?;
+                match decoded_packet {
+                    ClientboundConfigPacket::FinishConfiguration(_) => {
+                        eprintln!("FinishConfiguration");
+                        state = State::Preticking;
+                    }
+                    _ => (),
+                }
+                listen_raw_writer.write(&packet).await?;
+            }
+
+            State::Preticking => {
+                let decoded_packet = azalea::protocol::read::deserialize_packet::<
+                    ClientboundGamePacket,
+                >(&mut Cursor::new(&packet));
+                if let Ok(decoded_packet) = decoded_packet {
+                    match &decoded_packet {
+                        ClientboundGamePacket::SetDefaultSpawnPosition(spawn) => {
+                            let x = (spawn.pos.x / 16) - 2;
+                            let z = (spawn.pos.z / 16) + 1;
+                            let offset = ChunkOffset { x, z };
+                            eprintln!("offset found: {x} {z}");
+
+                            let mut w = offset_lock.write().await;
+                            *w = Some(offset)
+                        }
+                        ClientboundGamePacket::TickingState(_) => {
+                            eprintln!("entered ticking state");
+                            state = State::Ticking;
+                        }
+                        _ => (),
+                    }
+                }
+
+                pretick_packets.push(packet);
+
+                // State::Preticking -> State::Ticking
+                if matches!(state, State::Ticking) {
+                    for packet in pretick_packets {
+                        let packet = clientbound::handle(&mut state, &offset_lock, packet).await?;
+                        listen_raw_writer.write(&packet).await?;
+                    }
+                    pretick_packets = vec![];
+                }
+            }
+            State::Ticking => {
+                let packet = clientbound::handle(&mut state, &offset_lock, packet).await?;
+                listen_raw_writer.write(&packet).await?;
+            }
+        }
+    }
+}
+
+enum State {
+    Configuration,
+    Preticking,
+    Ticking,
 }

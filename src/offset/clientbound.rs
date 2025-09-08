@@ -1,6 +1,44 @@
-use azalea::protocol::packets::game::ClientboundGamePacket;
+use std::{io::Cursor, sync::Arc};
 
-use crate::offset::ChunkOffset;
+use anyhow::{Result, bail};
+use azalea::protocol::packets::game::ClientboundGamePacket;
+use tokio::sync::RwLock;
+
+use crate::{State, offset::ChunkOffset};
+
+pub async fn handle(
+    state: &mut State,
+    offset_lock: &Arc<RwLock<Option<ChunkOffset>>>,
+    packet: Box<[u8]>,
+) -> Result<Box<[u8]>> {
+    let decoded_packet = azalea::protocol::read::deserialize_packet::<ClientboundGamePacket>(
+        &mut Cursor::new(&packet),
+    );
+
+    if let Ok(mut decoded_packet) = decoded_packet {
+        match &decoded_packet {
+            ClientboundGamePacket::StartConfiguration(_) => {
+                let mut w = offset_lock.write().await;
+                *w = None;
+                *state = State::Configuration;
+            }
+            _ => (),
+        }
+
+        // only attempt to modify + serialize the packet if it needs to be
+        if needs_offset(&decoded_packet) {
+            if let Some(offset) = *offset_lock.read().await {
+                self::offset(offset, &mut decoded_packet);
+                return Ok(azalea::protocol::write::serialize_packet(&decoded_packet)?);
+            } else {
+                bail!("offset is unknown even though we're ticking")
+            }
+        }
+    }
+
+    // forward as is
+    Ok(packet)
+}
 
 pub fn offset(offset: ChunkOffset, packet: &mut ClientboundGamePacket) {
     match packet {
