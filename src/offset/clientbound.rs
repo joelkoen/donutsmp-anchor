@@ -43,9 +43,10 @@ pub fn offset(offset: ChunkOffset, packet: &mut ClientboundGamePacket) {
         ClientboundGamePacket::OpenSignEditor(sign) => {
             sign.pos -= offset;
         }
-        // ClientboundGamePacket::SectionBlocksUpdate(section) => {
-
-        // }
+        ClientboundGamePacket::SectionBlocksUpdate(section) => {
+            section.section_pos.x -= offset.x;
+            section.section_pos.z -= offset.z;
+        }
         // ClientboundGamePacket::DamageEvent(x)
         // Explode
         // LightUpdate
@@ -89,6 +90,7 @@ pub fn needs_offset(packet: &ClientboundGamePacket) -> bool {
         | ClientboundGamePacket::LevelEvent(_)
         | ClientboundGamePacket::LevelParticles(_)
         | ClientboundGamePacket::OpenSignEditor(_)
+        | ClientboundGamePacket::SectionBlocksUpdate(_)
         | ClientboundGamePacket::Sound(_)
         | ClientboundGamePacket::TeleportEntity(_)
         | ClientboundGamePacket::BlockDestruction(_)
