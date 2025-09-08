@@ -1,6 +1,6 @@
-use std::ops::Sub;
+use std::ops::{Sub, SubAssign};
 
-use azalea::Vec3;
+use azalea::{BlockPos, Vec3, core::position::ChunkPos};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkOffset {
@@ -9,11 +9,56 @@ pub struct ChunkOffset {
 }
 
 impl ChunkOffset {
+    pub fn block_x(&self) -> i32 {
+        self.x * 16
+    }
+
+    pub fn block_z(&self) -> i32 {
+        self.z * 16
+    }
+}
+
+impl ChunkOffset {
     pub fn vec3(&self) -> Vec3 {
         Vec3 {
-            x: self.x as f64,
+            x: self.block_x() as f64,
             y: 0.0,
-            z: self.z as f64,
+            z: self.block_z() as f64,
         }
+    }
+}
+
+impl Sub<ChunkOffset> for BlockPos {
+    type Output = BlockPos;
+
+    fn sub(self, rhs: ChunkOffset) -> Self::Output {
+        BlockPos {
+            x: self.x - (rhs.x * 16),
+            y: self.y,
+            z: self.z - (rhs.z * 16),
+        }
+    }
+}
+
+impl SubAssign<ChunkOffset> for BlockPos {
+    fn sub_assign(&mut self, rhs: ChunkOffset) {
+        *self = *self - rhs;
+    }
+}
+
+impl Sub<ChunkOffset> for ChunkPos {
+    type Output = ChunkPos;
+
+    fn sub(self, rhs: ChunkOffset) -> Self::Output {
+        ChunkPos {
+            x: self.x,
+            z: self.z,
+        }
+    }
+}
+
+impl SubAssign<ChunkOffset> for ChunkPos {
+    fn sub_assign(&mut self, rhs: ChunkOffset) {
+        *self = *self - rhs;
     }
 }
