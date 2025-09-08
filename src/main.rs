@@ -383,6 +383,7 @@ async fn remote_to_local(
     // isntead, we don't send any packets to the client until we've got the info to be able to reverse the offset
     let mut state = State::Configuration;
     let mut pretick_packets: Vec<Box<[u8]>> = vec![];
+    let mut spawn_chunk = (0, 0);
 
     loop {
         let packet = target_raw_reader.read().await?;
@@ -407,9 +408,15 @@ async fn remote_to_local(
                 >(&mut Cursor::new(&packet));
                 if let Ok(decoded_packet) = decoded_packet {
                     match &decoded_packet {
+                        ClientboundGamePacket::Login(login) => {
+                            spawn_chunk = match &*login.common.dimension.path {
+                                "overworld" => (-2, 1),
+                                _ => (0, 0),
+                            };
+                        }
                         ClientboundGamePacket::SetDefaultSpawnPosition(spawn) => {
-                            let x = (spawn.pos.x / 16) - 2;
-                            let z = (spawn.pos.z / 16) + 1;
+                            let x = (spawn.pos.x / 16) + spawn_chunk.0;
+                            let z = (spawn.pos.z / 16) + spawn_chunk.1;
                             let offset = ChunkOffset { x, z };
                             eprintln!("offset found: {x} {z}");
 
