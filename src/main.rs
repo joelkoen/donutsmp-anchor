@@ -1,6 +1,7 @@
 //! A "simple" server that gets login information and proxies connections.
 //! After login all connections are encrypted and Azalea cannot read them.
 
+use std::sync::Arc;
 use std::{error::Error, io::Cursor, sync::LazyLock};
 
 use anyhow::Result;
@@ -32,9 +33,12 @@ use azalea::protocol::{
 use futures::FutureExt;
 use offset::ChunkOffset;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
 use tracing::{Level, debug, error, info, warn};
 
 mod offset;
+
+use crate::offset::{clientbound, serverbound};
 
 const LISTEN_ADDR: &str = "127.0.0.1:25566";
 const TARGET_ADDR: &str = "donutsmp.net";
@@ -322,103 +326,118 @@ async fn transfer(
     let target_raw_reader = server_conn.reader.raw;
     let target_raw_writer = server_conn.writer.raw;
 
-    let copy_listen_to_target = tokio::spawn(async move {
-        let mut listen_raw_reader = listen_raw_reader;
-        let mut target_raw_writer = target_raw_writer;
+    let offset_lock: Arc<RwLock<Option<ChunkOffset>>> = Arc::new(RwLock::new(None));
 
-        loop {
-            let packet = match listen_raw_reader.read().await {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("Error reading packet from listen: {e}");
-                    return;
+    let copy_listen_to_target = tokio::spawn({
+        let offset_lock = offset_lock.clone();
+        async move {
+            let mut listen_raw_reader = listen_raw_reader;
+            let mut target_raw_writer = target_raw_writer;
+
+            loop {
+                let mut packet = match listen_raw_reader.read().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("Error reading packet from listen: {e}");
+                        return;
+                    }
+                };
+
+                // decode as a game packet
+                let decoded_packet = azalea::protocol::read::deserialize_packet::<
+                    ServerboundGamePacket,
+                >(&mut Cursor::new(&packet));
+                if let Ok(mut decoded_packet) = decoded_packet {
+                    if serverbound::needs_offset(&decoded_packet) {
+                        if let Some(offset) = *offset_lock.read().await {
+                            serverbound::offset(offset, &mut decoded_packet);
+                            packet =
+                                azalea::protocol::write::serialize_packet(&decoded_packet).unwrap();
+                        } else {
+                            error!("packet needed offsetting, but it is not known yet")
+                        }
+                    }
                 }
-            };
 
-            // decode as a game packet
-            let decoded_packet = azalea::protocol::read::deserialize_packet::<ServerboundGamePacket>(
-                &mut Cursor::new(&packet),
-            );
-            if let Ok(decoded_packet) = decoded_packet {
-                match decoded_packet {
-                    _ => (),
-                }
-            }
-
-            match target_raw_writer.write(&packet).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Error writing packet to target: {e}");
-                    return;
+                match target_raw_writer.write(&packet).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Error writing packet to target: {e}");
+                        return;
+                    }
                 }
             }
         }
     });
 
-    let copy_remote_to_local = tokio::spawn(async move {
-        let mut target_raw_reader = target_raw_reader;
-        let mut listen_raw_writer = listen_raw_writer;
+    let copy_remote_to_local = tokio::spawn({
+        let offset_lock = offset_lock.clone();
+        async move {
+            let mut target_raw_reader = target_raw_reader;
+            let mut listen_raw_writer = listen_raw_writer;
 
-        let mut offset = None;
-        let mut packets_to_offset: Vec<ClientboundGamePacket> = vec![];
+            let mut packets_to_offset: Vec<ClientboundGamePacket> = vec![];
 
-        loop {
-            let mut packet = match target_raw_reader.read().await {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("Error reading packet from target: {e}");
-                    return;
-                }
-            };
+            loop {
+                let mut packet = match target_raw_reader.read().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!("Error reading packet from target: {e}");
+                        return;
+                    }
+                };
 
-            // decode as a game packet
-            let decoded_packet = azalea::protocol::read::deserialize_packet::<ClientboundGamePacket>(
-                &mut Cursor::new(&packet),
-            );
-            if let Ok(mut decoded_packet) = decoded_packet {
-                match &decoded_packet {
-                    ClientboundGamePacket::SetDefaultSpawnPosition(spawn) => {
-                        let x = (spawn.pos.x / 16) - 2;
-                        let z = (spawn.pos.z / 16) + 1;
-                        let offset_ = ChunkOffset { x, z };
-                        println!("offset found: {x} {z}");
+                // decode as a game packet
+                let decoded_packet = azalea::protocol::read::deserialize_packet::<
+                    ClientboundGamePacket,
+                >(&mut Cursor::new(&packet));
+                if let Ok(mut decoded_packet) = decoded_packet {
+                    match &decoded_packet {
+                        ClientboundGamePacket::SetDefaultSpawnPosition(spawn) => {
+                            let x = (spawn.pos.x / 16) - 2;
+                            let z = (spawn.pos.z / 16) + 1;
+                            let offset = ChunkOffset { x, z };
+                            println!("offset found: {x} {z}");
 
-                        for mut decoded_packet in packets_to_offset {
-                            offset_packet(offset_, &mut decoded_packet);
-                            let packet =
-                                azalea::protocol::write::serialize_packet(&decoded_packet).unwrap();
-                            match listen_raw_writer.write(&packet).await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    error!("Error writing packet to listen: {e}");
-                                    return;
+                            for mut decoded_packet in packets_to_offset {
+                                clientbound::offset(offset, &mut decoded_packet);
+                                let packet =
+                                    azalea::protocol::write::serialize_packet(&decoded_packet)
+                                        .unwrap();
+                                match listen_raw_writer.write(&packet).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("Error writing packet to listen: {e}");
+                                        return;
+                                    }
                                 }
                             }
+                            packets_to_offset = vec![];
+
+                            let mut w = offset_lock.write().await;
+                            *w = Some(offset)
                         }
-                        packets_to_offset = vec![];
-
-                        offset = Some(offset_);
+                        _ => (),
                     }
-                    _ => (),
-                }
 
-                if packet_needs_offset(&decoded_packet) {
-                    if let Some(offset) = offset {
-                        offset_packet(offset, &mut decoded_packet);
-                        packet =
-                            azalea::protocol::write::serialize_packet(&decoded_packet).unwrap();
-                    } else {
-                        packets_to_offset.push(decoded_packet);
-                        continue;
+                    if clientbound::needs_offset(&decoded_packet) {
+                        if let Some(offset) = *offset_lock.read().await {
+                            clientbound::offset(offset, &mut decoded_packet);
+                            packet =
+                                azalea::protocol::write::serialize_packet(&decoded_packet).unwrap();
+                        } else {
+                            packets_to_offset.push(decoded_packet);
+                            continue;
+                        }
                     }
                 }
-            }
 
-            match listen_raw_writer.write(&packet).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Error writing packet to listen: {e}");
-                    return;
+                match listen_raw_writer.write(&packet).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Error writing packet to listen: {e}");
+                        return;
+                    }
                 }
             }
         }
@@ -427,88 +446,4 @@ async fn transfer(
     tokio::try_join!(copy_listen_to_target, copy_remote_to_local,)?;
 
     Ok(())
-}
-
-fn offset_packet(offset: ChunkOffset, packet: &mut ClientboundGamePacket) {
-    match packet {
-        ClientboundGamePacket::PlayerPosition(position) => {
-            if !position.relative.x {
-                position.change.pos.x -= (offset.x * 16) as f64;
-            }
-            if !position.relative.z {
-                position.change.pos.z -= (offset.z * 16) as f64;
-            }
-        }
-        ClientboundGamePacket::AddEntity(entity) => {
-            entity.position = entity.position - offset.vec3();
-        }
-        ClientboundGamePacket::EntityPositionSync(position) => {
-            position.values.pos = position.values.pos - offset.vec3();
-        }
-        ClientboundGamePacket::LevelChunkWithLight(x) => {
-            x.x -= offset.x;
-            x.z -= offset.z;
-        }
-        ClientboundGamePacket::SetChunkCacheCenter(x) => {
-            x.x -= offset.x;
-            x.z -= offset.z;
-        }
-        ClientboundGamePacket::BlockEntityData(block) => {
-            block.pos -= offset;
-        }
-        ClientboundGamePacket::ForgetLevelChunk(chunk) => {
-            chunk.pos -= offset;
-        }
-        ClientboundGamePacket::ChunksBiomes(chunks) => {
-            for chunk in &mut chunks.chunk_biome_data {
-                chunk.pos -= offset;
-            }
-        }
-        ClientboundGamePacket::LevelEvent(event) => {
-            event.pos -= offset;
-        }
-        ClientboundGamePacket::LevelParticles(particles) => {
-            particles.pos = particles.pos - offset.vec3();
-        }
-        ClientboundGamePacket::OpenSignEditor(sign) => {
-            sign.pos -= offset;
-        }
-        // ClientboundGamePacket::SectionBlocksUpdate(section) => {
-
-        // }
-        // ClientboundGamePacket::DamageEvent(x)
-        // Explode
-        ClientboundGamePacket::Sound(sound) => {
-            sound.x -= offset.block_x();
-            sound.z -= offset.block_z();
-        }
-        ClientboundGamePacket::TeleportEntity(entity) => {
-            if !entity.relative.x {
-                entity.change.pos.x -= (offset.x * 16) as f64;
-            }
-            if !entity.relative.z {
-                entity.change.pos.z -= (offset.z * 16) as f64;
-            }
-        }
-        _ => (),
-    }
-}
-
-fn packet_needs_offset(packet: &ClientboundGamePacket) -> bool {
-    match packet {
-        ClientboundGamePacket::PlayerPosition(_)
-        | ClientboundGamePacket::AddEntity(_)
-        | ClientboundGamePacket::EntityPositionSync(_)
-        | ClientboundGamePacket::LevelChunkWithLight(_)
-        | ClientboundGamePacket::SetChunkCacheCenter(_)
-        | ClientboundGamePacket::BlockEntityData(_)
-        | ClientboundGamePacket::ForgetLevelChunk(_)
-        | ClientboundGamePacket::ChunksBiomes(_)
-        | ClientboundGamePacket::LevelEvent(_)
-        | ClientboundGamePacket::LevelParticles(_)
-        | ClientboundGamePacket::OpenSignEditor(_)
-        | ClientboundGamePacket::Sound(_)
-        | ClientboundGamePacket::TeleportEntity(_) => true,
-        _ => false,
-    }
 }

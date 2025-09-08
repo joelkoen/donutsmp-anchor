@@ -1,6 +1,9 @@
-use std::ops::{Sub, SubAssign};
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 use azalea::{BlockPos, Vec3, core::position::ChunkPos};
+
+pub mod clientbound;
+pub mod serverbound;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkOffset {
@@ -28,14 +31,32 @@ impl ChunkOffset {
     }
 }
 
+impl Add<ChunkOffset> for BlockPos {
+    type Output = BlockPos;
+
+    fn add(self, rhs: ChunkOffset) -> Self::Output {
+        BlockPos {
+            x: self.x + rhs.block_x(),
+            y: self.y,
+            z: self.z + rhs.block_z(),
+        }
+    }
+}
+
+impl AddAssign<ChunkOffset> for BlockPos {
+    fn add_assign(&mut self, rhs: ChunkOffset) {
+        *self = *self + rhs;
+    }
+}
+
 impl Sub<ChunkOffset> for BlockPos {
     type Output = BlockPos;
 
     fn sub(self, rhs: ChunkOffset) -> Self::Output {
         BlockPos {
-            x: self.x - (rhs.x * 16),
+            x: self.x - rhs.block_x(),
             y: self.y,
-            z: self.z - (rhs.z * 16),
+            z: self.z - rhs.block_z(),
         }
     }
 }
@@ -51,8 +72,8 @@ impl Sub<ChunkOffset> for ChunkPos {
 
     fn sub(self, rhs: ChunkOffset) -> Self::Output {
         ChunkPos {
-            x: self.x,
-            z: self.z,
+            x: self.x - rhs.x,
+            z: self.z - rhs.z,
         }
     }
 }
