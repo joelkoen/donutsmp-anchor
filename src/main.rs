@@ -417,6 +417,10 @@ async fn transfer(
                             let mut w = offset_lock.write().await;
                             *w = Some(offset)
                         }
+                        ClientboundGamePacket::StartConfiguration(_) => {
+                            let mut w = offset_lock.write().await;
+                            *w = None;
+                        }
                         _ => (),
                     }
 

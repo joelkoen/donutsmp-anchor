@@ -48,6 +48,7 @@ pub fn offset(offset: ChunkOffset, packet: &mut ClientboundGamePacket) {
         // }
         // ClientboundGamePacket::DamageEvent(x)
         // Explode
+        // LightUpdate
         ClientboundGamePacket::Sound(sound) => {
             sound.x -= offset.block_x();
             sound.z -= offset.block_z();

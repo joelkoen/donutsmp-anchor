@@ -23,10 +23,8 @@ pub fn offset(offset: ChunkOffset, packet: &mut ServerboundGamePacket) {
             action.pos += offset;
         }
         ServerboundGamePacket::UseItemOn(action) => {
-            dbg!(&action);
             action.block_hit.block_pos += offset;
             action.block_hit.location = action.block_hit.location + offset.vec3();
-            dbg!(&action);
         }
         _ => (),
     }
